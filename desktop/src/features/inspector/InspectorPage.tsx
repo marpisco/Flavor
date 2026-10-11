@@ -164,7 +164,7 @@ export function InspectorPage({ query, onQueryChange, onOpenNetwork, onShowDevic
               <ul className="list candidate-list">
                 {result.candidates.map((c) => (
                   <CandidateRow
-                    key={`${c.device?.id?.networkId}:${c.device?.id?.nodeId}`}
+                    key={`${c.network?.id}:${c.device?.id?.nodeId}:${c.match}:${c.matchedValue}`}
                     candidate={c}
                     label={candidateLabel(result, c.status, c.match)}
                     onOpenNetwork={onOpenNetwork}
@@ -248,8 +248,9 @@ function CandidateRow({
   const d = c.device;
   const n = c.network;
   if (!d || !n) return null;
-  const name = d.hostname || d.dnsName;
-  const address = c.match === MatchKind.DEVICE_ADDRESS ? c.matchedValue : d.addresses[0];
+  const recordOnly = c.match === MatchKind.DNS_RECORD && !d.hostname && !d.dnsName;
+  const name = d.hostname || d.dnsName || (recordOnly ? c.matchedValue : "");
+  const address = c.match === MatchKind.DEVICE_ADDRESS || c.match === MatchKind.DNS_RECORD ? c.matchedValue : d.addresses[0];
   return (
     <li className={`card candidate ${c.status === CandidateStatus.OUTRANKED ? "candidate-outranked" : ""}`}>
       <div className="row">
@@ -262,7 +263,8 @@ function CandidateRow({
       <dl className="dl">
         <dt>Device</dt>
         <dd>
-          {name} <span className={`badge ${d.online ? "badge-ok" : ""}`}>{d.online ? "Online" : "Offline"}</span>{" "}
+          {name}{" "}
+          {!recordOnly && <span className={`badge ${d.online ? "badge-ok" : ""}`}>{d.online ? "Online" : "Offline"}</span>}{" "}
           {d.local && <span className="badge">This device</span>}
         </dd>
         <dt>Matched</dt>
@@ -305,7 +307,7 @@ function CandidateRow({
             Prefer {n.displayName}
           </Button>
         )}
-        {d.id && <Button onClick={() => onShowDevice(n.id, d.id!.nodeId)}>Show device</Button>}
+        {d.id?.nodeId && <Button onClick={() => onShowDevice(n.id, d.id!.nodeId)}>Show device</Button>}
         <Button onClick={() => onOpenNetwork(n.id)}>Open network</Button>
       </div>
     </li>
