@@ -5,12 +5,16 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"regexp"
+	"slices"
 	"sync"
+	"time"
 
 	"git.lunarlabs.dev/flavor/flavor/internal/domain"
 	"git.lunarlabs.dev/flavor/flavor/internal/logging"
 	"git.lunarlabs.dev/flavor/flavor/internal/provider"
+	"git.lunarlabs.dev/flavor/flavor/internal/relay"
 	"tailscale.com/client/local"
 	"tailscale.com/ipn"
 	"tailscale.com/tailcfg"
@@ -22,8 +26,10 @@ type tsnetEngine struct {
 	srv *tsnet.Server
 	lc  *local.Client
 
-	mu      sync.Mutex
-	records []domain.DNSRecord
+	mu         sync.Mutex
+	records    []domain.DNSRecord
+	approved   []netip.Prefix
+	advertised []netip.Prefix
 }
 
 func newTsnetEngine(cfg provider.ResolvedSessionConfig, authKey string, log *slog.Logger) (Engine, error) {
@@ -44,8 +50,31 @@ func newTsnetEngine(cfg provider.ResolvedSessionConfig, authKey string, log *slo
 	if cfg.ControlURL != "" {
 		srv.ControlURL = cfg.ControlURL
 	}
-	return &tsnetEngine{srv: srv}, nil
+	e := &tsnetEngine{srv: srv}
+	srv.RegisterFallbackTCPHandler(e.forward)
+	return e, nil
 }
+
+func (e *tsnetEngine) forward(_, dst netip.AddrPort) (func(net.Conn), bool) {
+	e.mu.Lock()
+	ok := forwardable(dst.Addr(), e.advertised)
+	e.mu.Unlock()
+	if !ok {
+		return nil, false
+	}
+	return func(c net.Conn) {
+		defer c.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), forwardDialTimeout)
+		up, err := new(net.Dialer).DialContext(ctx, "tcp", dst.String())
+		cancel()
+		if err != nil {
+			return
+		}
+		relay.Pipe(c, up)
+	}, true
+}
+
+const forwardDialTimeout = 30 * time.Second
 
 var tsnetSecrets = regexp.MustCompile(`(?i)[a-z][a-z0-9+.-]*://\S+|\b(?:tskey|hskey)-\S+|\b(?:[a-z]+key|nlpriv|nlpub|chalpriv):[0-9a-f]+|\b[0-9a-f]{32,}\b|[a-z0-9_-]{40,}`)
 
@@ -89,6 +118,22 @@ func (e *tsnetEngine) SetExitNode(ctx context.Context, id domain.NodeID) error {
 	return err
 }
 
+func (e *tsnetEngine) SetAdvertisedRoutes(ctx context.Context, routes []netip.Prefix) error {
+	if e.lc == nil {
+		return fmt.Errorf("local client unavailable")
+	}
+	prefs, err := e.lc.EditPrefs(ctx, &ipn.MaskedPrefs{
+		Prefs:              ipn.Prefs{AdvertiseRoutes: routes},
+		AdvertiseRoutesSet: true,
+	})
+	if err == nil {
+		e.mu.Lock()
+		e.advertised = slices.Clone(prefs.AdvertiseRoutes)
+		e.mu.Unlock()
+	}
+	return err
+}
+
 func (e *tsnetEngine) ClearAuthKey() {
 	e.srv.AuthKey = ""
 }
@@ -102,8 +147,14 @@ func (e *tsnetEngine) Status(ctx context.Context) (EngineStatus, error) {
 		return EngineStatus{}, err
 	}
 	out := projectStatus(st)
+	prefs, perr := e.lc.GetPrefs(ctx)
 	e.mu.Lock()
+	if perr == nil && prefs != nil {
+		out.AdvertisedRoutes = slices.Clone(prefs.AdvertiseRoutes)
+		e.advertised = slices.Clone(prefs.AdvertiseRoutes)
+	}
 	out.DNSRecords = domain.CloneDNSRecords(e.records)
+	out.ApprovedRoutes = slices.Clone(e.approved)
 	e.mu.Unlock()
 	return out, nil
 }
@@ -124,8 +175,12 @@ func (e *tsnetEngine) Watch(ctx context.Context, emit func(EngineNotify)) error 
 		}
 		if n.NetMap != nil {
 			records := projectDNSRecords(&n.NetMap.DNS)
+			var approved []netip.Prefix
+			if self := n.NetMap.SelfNode; self.Valid() {
+				approved = approvedRoutes(append(self.AllowedIPs().AsSlice(), self.PrimaryRoutes().AsSlice()...), self.Addresses().AsSlice())
+			}
 			e.mu.Lock()
-			e.records = records
+			e.records, e.approved = records, approved
 			e.mu.Unlock()
 		}
 		ev := EngineNotify{LoginFinished: n.LoginFinished != nil, NetMapChanged: n.NetMap != nil}

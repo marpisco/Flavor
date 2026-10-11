@@ -44,7 +44,7 @@ func (s *Service) SetExitNode(ctx context.Context, rawNetwork, rawNode string) (
 	case !target.ExitNodeOption:
 		return domain.Device{}, fail(CodeNotAnExitNode, "this device does not offer to be an exit node", false)
 	}
-	if err := s.applyExitNode(ctx, sess, node); err != nil {
+	if err := s.applyExitNode(ctx, sess, id, node); err != nil {
 		return domain.Device{}, err
 	}
 	for _, d := range sess.Devices() {
@@ -69,7 +69,7 @@ func (s *Service) ClearExitNode(ctx context.Context, rawNetwork string) error {
 	if err != nil {
 		return err
 	}
-	return s.applyExitNode(ctx, sess, "")
+	return s.applyExitNode(ctx, sess, id, "")
 }
 
 func (s *Service) connectedSession(ctx context.Context, id domain.NetworkID) (*session.Session, error) {
@@ -87,8 +87,17 @@ func (s *Service) connectedSession(ctx context.Context, id domain.NetworkID) (*s
 	return nil, fail(CodeDestinationUnreachable, "network is not connected", false)
 }
 
-func (s *Service) applyExitNode(ctx context.Context, sess *session.Session, node domain.NodeID) error {
-	err := sess.SetExitNode(ctx, node)
+func (s *Service) applyExitNode(ctx context.Context, sess *session.Session, id domain.NetworkID, node domain.NodeID) error {
+	if err := s.sessionError(sess, sess.SetExitNode(ctx, node), "setting exit node failed", "could not change the exit node"); err != nil {
+		return err
+	}
+	if err := s.cfg.Store.Networks().SetExitNode(ctx, id, node); err != nil {
+		return s.storeErr(err)
+	}
+	return nil
+}
+
+func (s *Service) sessionError(sess *session.Session, err error, logMsg, safeMsg string) error {
 	switch {
 	case err == nil:
 		return nil
@@ -97,6 +106,6 @@ func (s *Service) applyExitNode(ctx context.Context, sess *session.Session, node
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return fail(CodeBusy, "operation did not complete in time", true)
 	}
-	s.cfg.Log.Error("setting exit node failed", "network_id", sess.ID(), "err", err.Error())
-	return fail(CodeInternal, "could not change the exit node", true)
+	s.cfg.Log.Error(logMsg, "network_id", sess.ID(), "err", err.Error())
+	return fail(CodeInternal, safeMsg, true)
 }

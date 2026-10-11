@@ -168,3 +168,62 @@ func TestProjectDNSRecords(t *testing.T) {
 		}
 	}
 }
+
+func TestApprovedRoutes(t *testing.T) {
+	addrs := []netip.Prefix{netip.MustParsePrefix("100.64.0.1/32"), netip.MustParsePrefix("fd7a:115c:a1e0::1/128")}
+	allowed := append(slices.Clone(addrs),
+		netip.MustParsePrefix("192.168.1.0/24"),
+		netip.MustParsePrefix("0.0.0.0/0"),
+		netip.MustParsePrefix("::/0"),
+		netip.MustParsePrefix("10.1.2.3/32"),
+	)
+	routes := approvedRoutes(append(allowed, netip.MustParsePrefix("192.168.1.0/24")), addrs)
+	want := []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24"), netip.MustParsePrefix("10.1.2.3/32")}
+	if !slices.Equal(routes, want) {
+		t.Fatalf("%v", routes)
+	}
+	if routes := approvedRoutes(addrs, addrs); len(routes) != 0 {
+		t.Fatalf("%v", routes)
+	}
+}
+
+func TestForwardable(t *testing.T) {
+	lan := []netip.Prefix{netip.MustParsePrefix("192.168.50.0/24")}
+	exit := append(slices.Clone(lan), netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0"))
+	for _, c := range []struct {
+		addr       string
+		advertised []netip.Prefix
+		want       bool
+	}{
+		{"192.168.50.7", lan, true},
+		{"192.168.51.7", lan, false},
+		{"192.168.51.7", exit, true},
+		{"2001:db8::1", exit, true},
+		{"100.64.0.9", exit, false},
+		{"127.0.0.1", exit, false},
+		{"::ffff:127.0.0.1", exit, false},
+		{"169.254.169.254", exit, false},
+		{"0.0.0.0", exit, false},
+		{"224.0.0.1", exit, false},
+	} {
+		if got := forwardable(netip.MustParseAddr(c.addr), c.advertised); got != c.want {
+			t.Errorf("%s %v: %v", c.addr, c.advertised, got)
+		}
+	}
+}
+
+func TestProjectAdvertised(t *testing.T) {
+	lan := netip.MustParsePrefix("192.168.1.0/24")
+	wide := netip.MustParsePrefix("10.0.0.0/8")
+	v4, v6 := netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")
+	routes := projectAdvertised(EngineStatus{
+		AdvertisedRoutes: []netip.Prefix{lan, v4, wide, lan, netip.MustParsePrefix("10.9.9.9/16")},
+		ApprovedRoutes:   []netip.Prefix{wide, netip.MustParsePrefix("172.16.0.0/12")},
+	})
+	if len(routes) != 3 || routes[0].Prefix != wide || !routes[0].Approved || routes[1].Prefix != netip.MustParsePrefix("10.9.0.0/16") || routes[2].Prefix != lan || routes[2].Approved {
+		t.Fatalf("%+v", routes)
+	}
+	if routes := projectAdvertised(EngineStatus{AdvertisedRoutes: []netip.Prefix{v6, v4}}); len(routes) != 0 {
+		t.Fatalf("default routes are not subnet routes: %+v", routes)
+	}
+}

@@ -84,6 +84,40 @@ func routes(p *ipnstate.PeerStatus) []netip.Prefix {
 	return out
 }
 
+func approvedRoutes(allowed []netip.Prefix, addrs []netip.Prefix) []netip.Prefix {
+	var out []netip.Prefix
+	for _, r := range allowed {
+		if r.IsValid() && r.Bits() != 0 && !slices.Contains(addrs, r) && !slices.Contains(out, r.Masked()) {
+			out = append(out, r.Masked())
+		}
+	}
+	return out
+}
+
+func forwardable(a netip.Addr, advertised []netip.Prefix) bool {
+	a = a.Unmap()
+	if !a.IsValid() || a.IsLoopback() || a.IsUnspecified() || a.IsMulticast() || a.IsLinkLocalUnicast() || slices.ContainsFunc(domain.TailnetPrefixes, func(p netip.Prefix) bool { return p.Contains(a) }) {
+		return false
+	}
+	return slices.ContainsFunc(advertised, func(p netip.Prefix) bool { return p.Contains(a) })
+}
+
+func projectAdvertised(snap EngineStatus) []domain.AdvertisedRoute {
+	var routes []domain.AdvertisedRoute
+	for _, r := range snap.AdvertisedRoutes {
+		if !r.IsValid() || r.Bits() == 0 {
+			continue
+		}
+		r = r.Masked()
+		if slices.ContainsFunc(routes, func(a domain.AdvertisedRoute) bool { return a.Prefix == r }) {
+			continue
+		}
+		routes = append(routes, domain.AdvertisedRoute{Prefix: r, Approved: slices.Contains(snap.ApprovedRoutes, r)})
+	}
+	slices.SortFunc(routes, func(a, b domain.AdvertisedRoute) int { return a.Prefix.Compare(b.Prefix) })
+	return routes
+}
+
 func tags(p *ipnstate.PeerStatus) []string {
 	if p.Tags == nil || p.Tags.Len() == 0 {
 		return nil
@@ -168,6 +202,7 @@ func cloneLocalNode(n domain.LocalNode) domain.LocalNode {
 	if n.Addresses != nil {
 		out.Addresses = append([]netip.Addr(nil), n.Addresses...)
 	}
+	out.Routes = slices.Clone(n.Routes)
 	return out
 }
 
