@@ -9,11 +9,18 @@ use tauri::{Manager, WindowEvent};
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| tray::show_main(app)))
         .plugin(tauri_plugin_opener::init())
         .manage(commands::Daemon::new(flavor_ipc::default_socket_path()))
         .manage(events::Watcher::default())
         .manage(settings::Store::open(settings::default_path()))
-        .setup(|app| Ok(tray::install(app)?))
+        .setup(|app| {
+            tray::install(app)?;
+            if !std::env::args().any(|a| a == "--hidden") {
+                tray::show_main(app.handle());
+            }
+            Ok(())
+        })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let store = window.state::<settings::Store>();
